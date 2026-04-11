@@ -20,9 +20,6 @@ pipeline {
         }
         
         stage('Deploy') {
-            when {
-                branch 'master'
-            }
             steps {
                 echo '🚀 Docker 컨테이너 재배포 중...'
                 sh '''
