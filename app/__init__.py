@@ -1,0 +1,1 @@
+# PetMediScan AI Skin Module
