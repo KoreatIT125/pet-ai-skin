@@ -1,0 +1,59 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Dataset (대용량 파일 제외)
+data/
+dataset/
+*.jpg
+*.jpeg
+*.png
+*.mp4
+*.avi
+*.mov
+*.zip
+*.tar
+*.gz
+
+# Model weights
+*.pth
+*.pt
+*.h5
+*.weights
+models/*.pth
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
