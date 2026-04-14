@@ -8,6 +8,3 @@ torchvision
 ultralytics
 numpy
 pydantic==2.4.2
-
-# Needed to load YOLOv5-format weights that reference `models.yolo`
-git+https://github.com/ultralytics/yolov5.git
