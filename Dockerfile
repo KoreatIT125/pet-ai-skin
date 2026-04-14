@@ -4,6 +4,7 @@ WORKDIR /app
 
 # 시스템 의존성 설치
 RUN apt-get update && apt-get install -y \
+    git \
     libgl1 \
     libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
