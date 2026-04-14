@@ -90,6 +90,22 @@ def _load_model() -> None:
         return
 
     try:
+        # YOLOv5 weights may load via YOLOv5 codepath (`models.yolo`).
+        # Some combos call `BaseModel.fuse(verbose=...)` while YOLOv5's implementation
+        # does not accept the `verbose` kwarg. Patch it to be compatible.
+        try:
+            from models.yolo import BaseModel as _YoloV5BaseModel  # type: ignore
+
+            if hasattr(_YoloV5BaseModel, "fuse"):
+                _orig_fuse = _YoloV5BaseModel.fuse
+
+                def _fuse_compat(self, *args, **kwargs):  # type: ignore
+                    return _orig_fuse(self)
+
+                _YoloV5BaseModel.fuse = _fuse_compat  # type: ignore
+        except Exception:
+            pass
+
         _model = YOLO(MODEL_PATH)
         _model_load_error = None
     except Exception as e:
