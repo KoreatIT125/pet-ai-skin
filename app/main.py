@@ -6,6 +6,7 @@ import time
 from typing import Any, Optional
 
 import numpy as np
+import torch
 from fastapi import FastAPI, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -75,12 +76,13 @@ IOU_THRESHOLD = float(os.getenv("IOU_THRESHOLD", "0.7"))
 MAX_DETECTIONS = int(os.getenv("MAX_DETECTIONS", "50"))
 IMAGE_SIZE = int(os.getenv("IMAGE_SIZE", "640"))
 
-_model: Optional[YOLO] = None
+_model: Any = None
+_model_backend: str = "unknown"  # ultralytics | yolov5
 _model_load_error: Optional[str] = None
 
 
 def _load_model() -> None:
-    global _model, _model_load_error
+    global _model, _model_backend, _model_load_error
 
     if _model is not None:
         return
@@ -90,26 +92,38 @@ def _load_model() -> None:
         return
 
     try:
-        # YOLOv5 weights may load via YOLOv5 codepath (`models.yolo`).
-        # Some combos call `BaseModel.fuse(verbose=...)` while YOLOv5's implementation
-        # does not accept the `verbose` kwarg. Patch it to be compatible.
-        try:
-            from models.yolo import BaseModel as _YoloV5BaseModel  # type: ignore
+        # Prefer YOLOv5 native loading for YOLOv5-exported weights.
+        # Using ultralytics.YOLO() (YOLOv8) against YOLOv5 weights can raise
+        # compatibility errors (e.g. unexpected kwargs like `embed`, `verbose`).
+        _model = torch.hub.load(
+            "/app/yolov5",
+            "custom",
+            path=MODEL_PATH,
+            source="local",
+        )
+        _model_backend = "yolov5"
 
-            if hasattr(_YoloV5BaseModel, "fuse"):
-                _orig_fuse = _YoloV5BaseModel.fuse
+        # runtime options
+        if hasattr(_model, "conf"):
+            _model.conf = CONF_THRESHOLD
+        if hasattr(_model, "iou"):
+            _model.iou = IOU_THRESHOLD
+        if hasattr(_model, "max_det"):
+            _model.max_det = MAX_DETECTIONS
+        if hasattr(_model, "classes"):
+            _model.classes = None
 
-                def _fuse_compat(self, *args, **kwargs):  # type: ignore
-                    return _orig_fuse(self)
-
-                _YoloV5BaseModel.fuse = _fuse_compat  # type: ignore
-        except Exception:
-            pass
-
-        _model = YOLO(MODEL_PATH)
         _model_load_error = None
     except Exception as e:
-        _model_load_error = str(e)
+        # Fallback to ultralytics loader if needed
+        try:
+            _model = YOLO(MODEL_PATH)
+            _model_backend = "ultralytics"
+            _model_load_error = None
+        except Exception as e2:
+            _model = None
+            _model_backend = "unknown"
+            _model_load_error = str(e2) if str(e2) else str(e)
 
 
 @app.on_event("startup")
@@ -135,6 +149,39 @@ def _normalize_bbox_xyxy(xyxy: np.ndarray, w: int, h: int) -> list[float]:
     return [x1 / w, y1 / h, x2 / w, y2 / h]
 
 
+def _infer_yolov5(arr: np.ndarray) -> tuple[list[dict[str, Any]], dict[int, str]]:
+    # YOLOv5 model inference (torch.hub custom)
+    results = _model(arr, size=IMAGE_SIZE)  # type: ignore[misc]
+    names_any: Any = getattr(_model, "names", {})  # type: ignore[misc]
+    names: dict[int, str] = (
+        {int(k): str(v) for k, v in names_any.items()}
+        if isinstance(names_any, dict)
+        else {i: str(v) for i, v in enumerate(names_any)}
+        if isinstance(names_any, (list, tuple))
+        else {}
+    )
+
+    # results.xyxy: list[tensor] per image
+    preds = results.xyxy[0] if hasattr(results, "xyxy") and len(results.xyxy) else None
+    detections: list[dict[str, Any]] = []
+    if preds is None:
+        return detections, names
+
+    preds_np = preds.detach().cpu().numpy()
+    # columns: x1, y1, x2, y2, conf, cls
+    for row in preds_np:
+        x1, y1, x2, y2, conf, cls = row.tolist()
+        label = names.get(int(cls), str(int(cls)))
+        detections.append(
+            {
+                "label": label,
+                "score": float(conf),
+                "bbox_xyxy": [float(x1), float(y1), float(x2), float(y2)],
+            }
+        )
+    return detections, names
+
+
 @app.get("/")
 def root():
     """API 루트"""
@@ -158,6 +205,7 @@ def health_check():
             "version": MODEL_VERSION,
             "path": MODEL_PATH,
         },
+        "backend": _model_backend,
         "error": _model_load_error,
     }
 
@@ -198,35 +246,49 @@ async def predict(image: UploadFile = File(...)):
         arr = np.array(pil)
         t2 = time.perf_counter()
 
-        results = _model.predict(
-            source=arr,
-            imgsz=IMAGE_SIZE,
-            conf=CONF_THRESHOLD,
-            iou=IOU_THRESHOLD,
-            max_det=MAX_DETECTIONS,
-            verbose=False,
-        )
-        t3 = time.perf_counter()
-
-        names = _get_model_names()
         detections: list[dict[str, Any]] = []
+        names: dict[int, str] = {}
 
-        r0 = results[0]
-        if getattr(r0, "boxes", None) is not None and len(r0.boxes) > 0:
-            boxes = r0.boxes
-            xyxy = boxes.xyxy.cpu().numpy()
-            conf = boxes.conf.cpu().numpy()
-            cls = boxes.cls.cpu().numpy().astype(int)
-
-            for i in range(len(conf)):
-                label = names.get(int(cls[i]), str(int(cls[i])))
+        if _model_backend == "yolov5":
+            det_raw, names = _infer_yolov5(arr)
+            for d in det_raw:
+                x1, y1, x2, y2 = d["bbox_xyxy"]
                 detections.append(
                     {
-                        "label": label,
-                        "score": float(conf[i]),
-                        "bbox": _normalize_bbox_xyxy(xyxy[i], w=w, h=h),
+                        "label": d["label"],
+                        "score": float(d["score"]),
+                        "bbox": _normalize_bbox_xyxy(np.array([x1, y1, x2, y2]), w=w, h=h),
                     }
                 )
+        else:
+            results = _model.predict(
+                source=arr,
+                imgsz=IMAGE_SIZE,
+                conf=CONF_THRESHOLD,
+                iou=IOU_THRESHOLD,
+                max_det=MAX_DETECTIONS,
+                verbose=False,
+            )
+            names = _get_model_names()
+
+            r0 = results[0]
+            if getattr(r0, "boxes", None) is not None and len(r0.boxes) > 0:
+                boxes = r0.boxes
+                xyxy = boxes.xyxy.cpu().numpy()
+                conf = boxes.conf.cpu().numpy()
+                cls = boxes.cls.cpu().numpy().astype(int)
+
+                for i in range(len(conf)):
+                    label = names.get(int(cls[i]), str(int(cls[i])))
+                    detections.append(
+                        {
+                            "label": label,
+                            "score": float(conf[i]),
+                            "bbox": _normalize_bbox_xyxy(xyxy[i], w=w, h=h),
+                        }
+                    )
+
+        t3 = time.perf_counter()
 
         detections.sort(key=lambda d: d["score"], reverse=True)
 
