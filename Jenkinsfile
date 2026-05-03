@@ -101,7 +101,7 @@ pipeline {
                     
                     docker run -d \
                         --name petmediscan-ai-skin \
-                        --network pet-infra_petmediscan-network \
+                        --network petmediscan-infra_petmediscan-network \
                         -p 5001:5001 \
                         -e MODEL_VERSION=skin_model_final \
                         -e MODEL_PATH=/app/models/skin_model_final/best.pt \
